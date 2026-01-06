@@ -177,8 +177,8 @@ class StockAnalyzerApp:
             stock_hist = stock_hist.sort_values('日期', ascending=True)
             index_data = index_data.sort_values('date', ascending=True)
             
-            # 计算累计涨幅
-            stock_start_price = stock_hist.iloc[0]['收盘']
+            # 计算累计涨幅 - 使用起始日开盘价和终止日收盘价
+            stock_start_price = stock_hist.iloc[0]['开盘']
             stock_end_price = stock_hist.iloc[-1]['收盘']
             stock_cumulative_return = (stock_end_price - stock_start_price) / stock_start_price
             
@@ -200,6 +200,9 @@ class StockAnalyzerApp:
             # 计算偏离值
             self.root.after(0, lambda: self.result_textbox.insert("0.0", "正在计算偏离值...\n"))
             self.root.after(0, lambda: self.progress_bar.set(0.6))
+            
+            # 获取实际交易日数
+            trading_days = len(stock_hist)
             
             # 计算收益率
             stock_hist['收益率'] = stock_hist['收盘'].pct_change()
@@ -232,7 +235,7 @@ class StockAnalyzerApp:
             self.root.after(0, lambda: self.result_textbox.insert("0.0", "正在生成异动监管建议...\n"))
             self.root.after(0, lambda: self.progress_bar.set(0.8))
             
-            advice_1d, advice_2d, advice_3d = self.generate_advice(deviation, stock_avg_return - index_avg_return)
+            advice_text, advice_1d, advice_2d, advice_3d = self.generate_advice(deviation, stock_avg_return - index_avg_return, trading_days, stock_end_price, stock_start_price)
             
             # 显示结果
             result = f"""
@@ -245,7 +248,9 @@ class StockAnalyzerApp:
 - {index_name}区间累计涨幅: {index_cumulative_return:.4f} ({index_cumulative_return*100:.2f}%)
 - 累计涨幅偏离值: {deviation:.4f} ({deviation*100:.2f}%)
 
-异动监管建议:
+{advice_text}
+
+操作建议:
 - 第1天: {advice_1d}
 - 第2天: {advice_2d}
 - 第3天: {advice_3d}
@@ -277,39 +282,87 @@ class StockAnalyzerApp:
         
         return stock_avg - index_avg
     
-    def generate_advice(self, cumulative_deviation, avg_deviation):
+    def generate_advice(self, cumulative_deviation, avg_deviation, trading_days, stock_current_price, stock_start_price):
         """
         根据偏离值生成异动监管建议
         """
-        # 根据偏离值的大小和方向给出不同的建议
-        abs_cumulative_deviation = abs(cumulative_deviation)
-        abs_avg_deviation = abs(avg_deviation)
+        # 根据实际交易日数和偏离值判断是否接近监管红线
+        days_10_limit = 1.0  # 10天100%限制
+        days_30_limit = 2.0  # 30天200%限制
         
-        # 综合评估偏离程度
-        avg_deviation = (abs_cumulative_deviation + abs_avg_deviation) / 2
+        # 计算当前偏离百分比
+        current_deviation_pct = cumulative_deviation * 100
         
-        # 生成建议
-        if avg_deviation > 0.05:  # 偏离度较大
-            if cumulative_deviation > 0:
-                # 持续强势
-                advice_1d = "股票表现强势，偏离大盘较多，注意监管风险，建议关注资金流向"
-                advice_2d = "强势股需关注后续资金持续性，警惕高位调整风险"
-                advice_3d = "若偏离度持续扩大，可能触发异动监管，建议谨慎操作"
+        # 计算未来3天分别涨多少会达到异常监管条件
+        # 10天规则：偏离值不能超过100%
+        days_10_needed = 0
+        if trading_days <= 10:
+            remaining_deviation_10 = days_10_limit - cumulative_deviation
+            if remaining_deviation_10 > 0:
+                days_10_needed = remaining_deviation_10 / 3  # 平均分配到未来3天
             else:
-                # 持续弱势
-                advice_1d = "股票表现弱势，持续跑输大盘，关注基本面变化"
-                advice_2d = "弱势股需关注是否有资金抄底，或存在利空消息"
-                advice_3d = "若持续弱势，可能影响投资者信心，建议等待企稳信号"
-        elif avg_deviation > 0.02:  # 中等偏离
-            advice_1d = "股票有一定偏离，属于正常波动范围，继续观察"
+                days_10_needed = 0  # 已经超过限制
+        
+        # 30天规则：偏离值不能超过200%
+        days_30_needed = 0
+        if trading_days <= 30:
+            remaining_deviation_30 = days_30_limit - cumulative_deviation
+            if remaining_deviation_30 > 0:
+                days_30_needed = remaining_deviation_30 / 3  # 平均分配到未来3天
+            else:
+                days_30_needed = 0  # 已经超过限制
+        
+        # 计算对应的价格涨幅
+        day1_price_10 = stock_current_price * (1 + days_10_needed) if days_10_needed > 0 else stock_current_price
+        day1_price_30 = stock_current_price * (1 + days_30_needed) if days_30_needed > 0 else stock_current_price
+        day1_pct_10 = days_10_needed * 100 if days_10_needed > 0 else 0
+        day1_pct_30 = days_30_needed * 100 if days_30_needed > 0 else 0
+        
+        # 生成监管建议
+        advice_text = f"异动监管分析:\n"
+        advice_text += f"- 实际交易日数: {trading_days}天\n"
+        advice_text += f"- 当前偏离值: {current_deviation_pct:.2f}% (起始日开盘价{stock_start_price:.2f} -> 终止日收盘价{stock_current_price:.2f})\n"
+        
+        # 检查是否接近或超过监管限制
+        if trading_days <= 10:
+            advice_text += f"- 10天偏离限制: 100% | 当前偏离: {current_deviation_pct:.2f}%\n"
+            if cumulative_deviation > days_10_limit:
+                advice_text += f"- 警告: 已超过10天100%偏离限制！\n"
+            else:
+                advice_text += f"- 距离10天偏离限制: {((days_10_limit - cumulative_deviation) * 100):.2f}%\n"
+                advice_text += f"- 未来3天平均每日涨幅{day1_pct_10:.2f}%将触及10天偏离限制\n"
+        else:
+            advice_text += f"- 10天偏离限制: 100% | 本次分析为{trading_days}天，不适用\n"
+            
+        if trading_days <= 30:
+            advice_text += f"- 30天偏离限制: 200% | 当前偏离: {current_deviation_pct:.2f}%\n"
+            if cumulative_deviation > days_30_limit:
+                advice_text += f"- 警告: 已超过30天200%偏离限制！\n"
+            else:
+                advice_text += f"- 距离30天偏离限制: {((days_30_limit - cumulative_deviation) * 100):.2f}%\n"
+                advice_text += f"- 未来3天平均每日涨幅{day1_pct_30:.2f}%将触及30天偏离限制\n"
+        else:
+            advice_text += f"- 30天偏离限制: 200% | 本次分析为{trading_days}天，不适用\n"
+        
+        # 根据偏离程度生成操作建议
+        if cumulative_deviation > days_10_limit or cumulative_deviation > days_30_limit:
+            advice_1d = "已触发异常监管条件！建议立即关注交易所公告，控制仓位风险"
+            advice_2d = "偏离值过高，存在严重监管风险，建议暂停买入并考虑减仓"
+            advice_3d = "已严重偏离正常波动范围，需警惕监管措施和股价调整风险"
+        elif abs(cumulative_deviation) > 0.5:  # 偏离度较大 (>50%)
+            advice_1d = "偏离度较高，接近监管红线，建议谨慎操作"
+            advice_2d = "偏离值较大，存在监管风险，关注后续走势是否收敛"
+            advice_3d = "偏离度偏高，若继续扩大可能触发监管，建议控制仓位"
+        elif abs(cumulative_deviation) > 0.2:  # 中等偏离 (20-50%)
+            advice_1d = "有一定偏离，属于正常波动范围，继续观察"
             advice_2d = "偏离度中等，建议关注后续走势是否收敛"
             advice_3d = "偏离度适中，暂无明显监管风险，持续观察"
-        else:  # 偏离较小
-            advice_1d = "股票走势与大盘基本同步，偏离度较小，风险较低"
-            advice_2d = "与大盘同步运行，符合市场预期，风险可控"
+        else:  # 偏离较小 (<20%)
+            advice_1d = "偏离度较小，走势相对稳定，风险较低"
+            advice_2d = "与大盘走势基本同步，符合市场预期，风险可控"
             advice_3d = "走势稳定，偏离度小，暂无监管风险"
         
-        return advice_1d, advice_2d, advice_3d
+        return advice_text, advice_1d, advice_2d, advice_3d
     
     def update_ui_for_analysis(self):
         """分析开始时更新UI"""
